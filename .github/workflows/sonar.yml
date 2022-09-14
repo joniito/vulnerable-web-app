@@ -27,8 +27,8 @@ jobs:
         with:
             projectBaseDir: .
             args: >
-              -Dsonar.projectKey=${{github.event-repository.name}}
-              -Dsonar.projectName=${{github.event-repository.name}}
+              -Dsonar.projectKey=${{ github.event.repository.name}}
+              -Dsonar.projectName=${{ github.event.repository.name}}
               -Dsonar.source=.
               -Dsonar.sourceEncoding=UTF-8
       
