@@ -1,27 +1,26 @@
-#name: sast-sonar
+name: sast-sonar
 
-#on: 
-#  push: 
-#    branches: 
-#      - master
-#      #Ejemplo de lo que se puede utilizar
-#      #- develop      
-#      #- *
-#    pull_request:
-#        #Ejemplo de lo que se puede utilizar
-#        #types: [opened, synchronize, reopened]
-#        #Test
-#        branches: [master]
-#  
-#jobs: 
-#  sonar:
-#    runs-on: ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v3
-#    
-#      - name: SonarQube Scan
-#        uses: sonarsource/sonarqube-scan-action@master
-#        env:
-#          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-#          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-#
+on: 
+  push: 
+    branches: 
+      - master
+      #Ejemplo de lo que se puede utilizar
+      #- develop      
+      #- *
+    pull_request:
+        #Ejemplo de lo que se puede utilizar
+        #types: [opened, synchronize, reopened]
+        #Test
+        branches: [master]
+  
+jobs: 
+  sonar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+    
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
