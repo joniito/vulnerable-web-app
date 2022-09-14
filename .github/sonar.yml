@@ -10,6 +10,7 @@ on:
     pull_request:
         #Ejemplo de lo que se puede utilizar
         #types: [opened, synchronize, reopened]
+        #Test
         branches: [master]
   
 jobs: 
