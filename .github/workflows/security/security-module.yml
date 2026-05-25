@@ -1,0 +1,89 @@
+name: "[Module] Security"
+
+# =============================================================================
+# REUSABLE WORKFLOW — Orquestador del módulo de seguridad.
+# Agrupa todas las tareas de seguridad (grants, rotación de secrets, etc.)
+# y expone una única interfaz para que otros pipelines lo consuman.
+#
+# Cómo llamarlo desde otro workflow:
+#
+#   jobs:
+#     security:
+#       uses: ./.github/workflows/security/security-module.yml
+#       with:
+#         environment: prod
+#       secrets: inherit
+# =============================================================================
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev | staging | prod)"
+        required: true
+        type: string
+      dry_run:
+        description: "Ejecutar en modo simulación sin aplicar cambios"
+        required: false
+        type: boolean
+        default: false
+      # Flags para activar/desactivar tareas individuales del módulo.
+      # Permite que el caller elija qué parte de seguridad ejecutar.
+      run_redshift_grants:
+        description: "Ejecutar el job de Redshift grants"
+        required: false
+        type: boolean
+        default: true
+
+    outputs:
+      redshift_grants_result:
+        description: "Resultado del job de Redshift grants (success | failure | skipped)"
+        value: ${{ jobs.redshift-grants.result }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Redshift Grants
+  # Condición: solo corre si run_redshift_grants == true
+  # ---------------------------------------------------------------------------
+  redshift-grants:
+    name: Redshift Grants
+    if: ${{ inputs.run_redshift_grants }}
+    uses: ./.github/workflows/security/redshift-grants.yml
+    with:
+      environment: ${{ inputs.environment }}
+      dry_run:     ${{ inputs.dry_run }}
+    secrets: inherit   # Pasa AWS_ROLE_ARN_DEV/STAGING/PROD desde el caller
+
+  # ---------------------------------------------------------------------------
+  # Placeholder para futuras tareas del módulo de seguridad.
+  # Ejemplos: rotación de secrets, escaneo de permisos, auditoría IAM, etc.
+  # ---------------------------------------------------------------------------
+  # secret-rotation:
+  #   if: ${{ inputs.run_secret_rotation }}
+  #   uses: ./.github/workflows/security/secret-rotation.yml
+  #   with:
+  #     environment: ${{ inputs.environment }}
+  #   secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Job de resumen del módulo (siempre corre)
+  # ---------------------------------------------------------------------------
+  module-summary:
+    name: Security Module Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [redshift-grants]
+    steps:
+      - name: Report results
+        run: |
+          echo "## Security Module — Resumen"              >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tarea              | Resultado         |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------------------|-------------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Redshift Grants    | \`${{ needs.redshift-grants.result }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                                           >> "$GITHUB_STEP_SUMMARY"
+          echo "**Environment:** \`${{ inputs.environment }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Dry-run:** \`${{ inputs.dry_run }}\`"         >> "$GITHUB_STEP_SUMMARY"
+          echo "**Actor:** \`${{ github.actor }}\`"             >> "$GITHUB_STEP_SUMMARY"

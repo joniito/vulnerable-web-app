@@ -1,0 +1,67 @@
+name: Deploy & Security Pipeline
+
+# =============================================================================
+# EJEMPLO de workflow principal que llama al módulo de seguridad.
+# Este es el patrón que deben seguir los pipelines que necesiten
+# ejecutar grants u otras tareas de seguridad.
+# =============================================================================
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      dry_run:
+        description: "Dry-run en el módulo de seguridad"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # (Ejemplo) Tu lógica de deploy aquí
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy application
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine environment
+        id: set-env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy
+        run: |
+          echo "Desplegando en ${{ steps.set-env.outputs.environment }}..."
+          # Tu lógica de deploy real va aquí
+
+  # ---------------------------------------------------------------------------
+  # Módulo de seguridad — se ejecuta después del deploy
+  # Llama a security-module.yml pasando el ambiente resuelto arriba.
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security Module
+    needs: deploy
+    uses: ./.github/workflows/security/security-module.yml
+    with:
+      environment:          ${{ needs.deploy.outputs.environment }}
+      dry_run:              ${{ inputs.dry_run || false }}
+      run_redshift_grants:  true
+    secrets: inherit        # AWS_ROLE_ARN_DEV/STAGING/PROD fluyen automáticamente
