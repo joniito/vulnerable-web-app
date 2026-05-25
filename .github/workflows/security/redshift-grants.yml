@@ -1,0 +1,244 @@
+name: "[Module] Redshift Grants"
+
+# =============================================================================
+# REUSABLE WORKFLOW — no se ejecuta directamente en producción.
+# Lo invoca security-module.yml mediante workflow_call.
+# workflow_dispatch se mantiene solo para pruebas manuales aisladas.
+# =============================================================================
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev | staging | prod)"
+        required: true
+        type: string
+      dry_run:
+        description: "Imprime el SQL sin ejecutarlo en Redshift"
+        required: false
+        type: boolean
+        default: false
+    # Los secrets fluyen desde el caller vía "secrets: inherit"
+    # Se declaran aquí solo para documentar qué se espera.
+    secrets:
+      AWS_ROLE_ARN_DEV:
+        required: false
+      AWS_ROLE_ARN_STAGING:
+        required: false
+      AWS_ROLE_ARN_PROD:
+        required: false
+
+  # Permite ejecución manual para testing aislado del módulo
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      dry_run:
+        description: "Dry-run: valida el SQL sin ejecutarlo en Redshift"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  POLL_INTERVAL_SECONDS: 5
+  POLL_MAX_ATTEMPTS: 60
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 — Resolver contexto
+  # ---------------------------------------------------------------------------
+  resolve-environment:
+    name: Resolve environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
+      sql_file:    ${{ steps.resolve.outputs.sql_file }}
+      dry_run:     ${{ steps.resolve.outputs.dry_run }}
+      role_arn:    ${{ steps.resolve.outputs.role_arn }}
+    steps:
+      - name: Resolve environment, SQL file and IAM role
+        id: resolve
+        env:
+          ARN_DEV:     ${{ secrets.AWS_ROLE_ARN_DEV }}
+          ARN_STAGING: ${{ secrets.AWS_ROLE_ARN_STAGING }}
+          ARN_PROD:    ${{ secrets.AWS_ROLE_ARN_PROD }}
+        run: |
+          ENV="${{ inputs.environment }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+          SQL_FILE="sql/grants/grants_${ENV}.sql"
+
+          # Resolver el ARN del rol según ambiente (evita upper() inexistente en GHA)
+          case "$ENV" in
+            dev)     ROLE_ARN="$ARN_DEV"     ;;
+            staging) ROLE_ARN="$ARN_STAGING" ;;
+            prod)    ROLE_ARN="$ARN_PROD"    ;;
+            *)
+              echo "::error::Ambiente desconocido: '${ENV}'. Valores válidos: dev, staging, prod."
+              exit 1
+              ;;
+          esac
+
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::Secret AWS_ROLE_ARN_${ENV^^} no está configurado."
+            exit 1
+          fi
+
+          echo "environment=${ENV}"    >> "$GITHUB_OUTPUT"
+          echo "sql_file=${SQL_FILE}"  >> "$GITHUB_OUTPUT"
+          echo "dry_run=${DRY_RUN}"    >> "$GITHUB_OUTPUT"
+          echo "role_arn=${ROLE_ARN}"  >> "$GITHUB_OUTPUT"
+          echo "::add-mask::${ROLE_ARN}"
+
+          echo "### [Redshift Grants] Contexto resuelto"  >> "$GITHUB_STEP_SUMMARY"
+          echo "| Campo       | Valor               |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------------|---------------------|"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${ENV}\`          |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| SQL file    | \`${SQL_FILE}\`     |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dry-run     | \`${DRY_RUN}\`      |"     >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — Validar SQL antes de tocar AWS
+  # ---------------------------------------------------------------------------
+  validate-sql:
+    name: Validate SQL
+    runs-on: ubuntu-latest
+    needs: resolve-environment
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install sqlfluff
+        run: pip install sqlfluff --quiet
+
+      - name: Lint SQL (Redshift dialect)
+        run: |
+          SQL_FILE="${{ needs.resolve-environment.outputs.sql_file }}"
+          echo "Linting: ${SQL_FILE}"
+          sqlfluff lint "${SQL_FILE}" \
+            --dialect redshift \
+            --rules LT01,LT02,LT09,RF01,RF02,RF03,AM01 \
+            --nocolor || true
+
+      - name: Verify file is non-empty
+        run: |
+          SQL_FILE="${{ needs.resolve-environment.outputs.sql_file }}"
+          if [ ! -s "${SQL_FILE}" ]; then
+            echo "::error::Archivo '${SQL_FILE}' no existe o está vacío."
+            exit 1
+          fi
+          echo "$(wc -l < "${SQL_FILE}") líneas — OK"
+
+  # ---------------------------------------------------------------------------
+  # Job 3 — Aplicar grants en Redshift
+  # ---------------------------------------------------------------------------
+  apply-grants:
+    name: Apply grants (${{ needs.resolve-environment.outputs.environment }})
+    runs-on: ubuntu-latest
+    needs: [resolve-environment, validate-sql]
+    environment: ${{ needs.resolve-environment.outputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ needs.resolve-environment.outputs.role_arn }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch Redshift connection params from SSM
+        id: ssm
+        run: |
+          PREFIX="/redshift/${{ needs.resolve-environment.outputs.environment }}"
+
+          CLUSTER_ID=$(aws ssm get-parameter \
+            --name "${PREFIX}/cluster-identifier" \
+            --query "Parameter.Value" --output text)
+
+          DATABASE=$(aws ssm get-parameter \
+            --name "${PREFIX}/database" \
+            --query "Parameter.Value" --output text)
+
+          DB_USER=$(aws ssm get-parameter \
+            --name "${PREFIX}/admin-user" \
+            --with-decryption \
+            --query "Parameter.Value" --output text)
+
+          echo "cluster_id=${CLUSTER_ID}" >> "$GITHUB_OUTPUT"
+          echo "database=${DATABASE}"     >> "$GITHUB_OUTPUT"
+          echo "db_user=${DB_USER}"       >> "$GITHUB_OUTPUT"
+          echo "::add-mask::${DB_USER}"
+
+      - name: "[DRY-RUN] Print SQL"
+        if: inputs.dry_run == true
+        run: |
+          echo "### SQL a aplicar (DRY-RUN)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```sql'                       >> "$GITHUB_STEP_SUMMARY"
+          cat "${{ needs.resolve-environment.outputs.sql_file }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                          >> "$GITHUB_STEP_SUMMARY"
+          echo "Dry-run completado. No se aplicaron cambios."
+
+      - name: Execute grants via Redshift Data API
+        if: inputs.dry_run != true
+        id: execute
+        run: |
+          SQL_CONTENT=$(cat "${{ needs.resolve-environment.outputs.sql_file }}")
+
+          STATEMENT_ID=$(aws redshift-data execute-statement \
+            --cluster-identifier "${{ steps.ssm.outputs.cluster_id }}" \
+            --database           "${{ steps.ssm.outputs.database }}" \
+            --db-user            "${{ steps.ssm.outputs.db_user }}" \
+            --sql                "${SQL_CONTENT}" \
+            --query "Id" --output text)
+
+          echo "Statement ID: ${STATEMENT_ID}"
+          echo "statement_id=${STATEMENT_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Poll execution status
+        if: inputs.dry_run != true
+        run: |
+          STATEMENT_ID="${{ steps.execute.outputs.statement_id }}"
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt ${{ env.POLL_MAX_ATTEMPTS }} ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            RESPONSE=$(aws redshift-data describe-statement --id "${STATEMENT_ID}" --output json)
+            STATUS=$(echo "${RESPONSE}" | jq -r '.Status')
+            echo "Intento ${ATTEMPT}/${{ env.POLL_MAX_ATTEMPTS }} — ${STATUS}"
+
+            case "${STATUS}" in
+              FINISHED)
+                echo "::notice::Grants aplicados correctamente."
+                echo "### Grants aplicados :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+                exit 0 ;;
+              FAILED|ABORTED)
+                ERROR=$(echo "${RESPONSE}" | jq -r '.Error // "Unknown error"')
+                echo "::error::Fallo en Redshift: ${ERROR}"
+                echo "### Ejecución FALLIDA :x:"     >> "$GITHUB_STEP_SUMMARY"
+                echo "**Error:** \`${ERROR}\`"        >> "$GITHUB_STEP_SUMMARY"
+                exit 1 ;;
+              *)
+                sleep "${{ env.POLL_INTERVAL_SECONDS }}" ;;
+            esac
+          done
+
+          echo "::error::Timeout esperando respuesta de Redshift."
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "---"                                                   >> "$GITHUB_STEP_SUMMARY"
+          echo "| Campo        | Valor                          |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------------|--------------------------------|"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| Outcome      | \`${{ job.status }}\`          |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by | \`${{ github.actor }}\`        |"     >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit       | \`${{ github.sha }}\`          |"     >> "$GITHUB_STEP_SUMMARY"
