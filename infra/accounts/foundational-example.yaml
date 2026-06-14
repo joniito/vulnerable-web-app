@@ -1,0 +1,36 @@
+# Account data for the foundational AWS account.
+# Copy this file to <account_name>.yaml and adjust the values before rendering.
+account:
+  name: foundational
+  account_id: "000000000000"  # TBD: account id provided for the new foundational account
+  region: us-east-1
+  # profile: foundational-admin  # optional named AWS CLI profile
+  tags:
+    Environment: foundational
+    ManagedBy: terraform
+    Owner: devsecops
+
+# Placeholder roles - names and permissions to be confirmed.
+roles:
+  - name: SecurityAuditRole
+    description: Cross-account read-only role for the security/audit account
+    trusted_principals:
+      - "arn:aws:iam::111111111111:root"  # TBD: security/audit account id
+    managed_policy_arns:
+      - "arn:aws:iam::aws:policy/SecurityAudit"
+      - "arn:aws:iam::aws:policy/job-function/ViewOnlyAccess"
+
+  - name: TerraformDeployRole
+    description: Role assumed by the CI/CD pipeline to apply infrastructure changes
+    trusted_principals:
+      - "arn:aws:iam::222222222222:role/ci-cd-pipeline"  # TBD: CI/CD account/role
+    managed_policy_arns:
+      - "arn:aws:iam::aws:policy/PowerUserAccess"
+
+  - name: BreakGlassRole
+    description: Emergency access role, MFA required, usage should trigger alerts
+    trusted_principals:
+      - "arn:aws:iam::000000000000:root"  # TBD: who can assume this role
+    managed_policy_arns:
+      - "arn:aws:iam::aws:policy/AdministratorAccess"
+    max_session_duration: 3600

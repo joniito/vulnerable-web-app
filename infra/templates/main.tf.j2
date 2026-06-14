@@ -1,0 +1,87 @@
+## ----------------------------------------------------------------------
+## GENERATED FILE - do not edit by hand.
+## Source: infra/templates/main.tf.j2
+## Account: {{ account.name }}
+## ----------------------------------------------------------------------
+
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region  = "{{ account.region }}"
+{% if account.profile %}
+  profile = "{{ account.profile }}"
+{% endif %}
+
+  default_tags {
+    tags = {{ account.tags | tojson }}
+  }
+}
+
+{% for role in roles %}
+data "aws_iam_policy_document" "{{ role.key }}_trust" {
+{% if role.trusted_principals %}
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "AWS"
+      identifiers = {{ role.trusted_principals | tojson }}
+    }
+{% if role.external_id %}
+
+    condition {
+      test     = "StringEquals"
+      variable = "sts:ExternalId"
+      values   = ["{{ role.external_id }}"]
+    }
+{% endif %}
+  }
+{% endif %}
+{% if role.trusted_services %}
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = {{ role.trusted_services | tojson }}
+    }
+  }
+{% endif %}
+}
+
+module "{{ role.key }}" {
+  source = "../../modules/iam-role"
+
+  role_name           = "{{ role.name }}"
+  assume_role_policy  = data.aws_iam_policy_document.{{ role.key }}_trust.json
+  managed_policy_arns = {{ role.managed_policy_arns | tojson }}
+{% if role.inline_policies %}
+  inline_policies = {
+{% for policy_name, policy_doc in role.inline_policies.items() %}
+    "{{ policy_name }}" = jsonencode({{ policy_doc | tojson }})
+{% endfor %}
+  }
+{% else %}
+  inline_policies = {}
+{% endif %}
+{% if role.permissions_boundary %}
+  permissions_boundary = "{{ role.permissions_boundary }}"
+{% endif %}
+{% if role.max_session_duration %}
+  max_session_duration = {{ role.max_session_duration }}
+{% endif %}
+  tags = {{ role.tags | tojson }}
+}
+
+{% endfor %}
